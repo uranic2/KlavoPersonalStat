@@ -35,11 +35,26 @@ def probe(voc,start,end,user_id):
     return 'Доступный источник не предоставляет подтверждённых позиций ошибок в словах. Анализ всех заездов недоступен.'
 
 
+def sync_message(items,start,end):
+    labels=[]
+    for item in items:
+        name=(item.get('short_name') or item.get('name') or '').strip()
+        identifier=item['id']
+        unknown=not name or name in (f'Словарь {identifier}',f'Словарь №{identifier}')
+        labels.append(f'Словарь №{identifier}' if unknown else f'«{name}» (№{identifier})')
+    date=lambda value:dt.date.fromisoformat(value).strftime('%d.%m.%Y')
+    period=f'за {date(start)}' if start==end else f'за период с {date(start)} по {date(end)} включительно'
+    dictionaries='словаря '+labels[0] if len(labels)==1 else 'словарей: '+', '.join(labels)
+    return f'Загружены данные о результатах заездов для {dictionaries} {period}.'
+
+
 def sync_vocs(identifiers,start,end,progress=lambda **kw:None,path=None,user_id=core.USER_ID,today=None,errors=False):
     profiles.get(user_id,path)
     start,end,effective=dates(start,end,today)
     ids=list(dict.fromkeys(identifiers))
-    for voc in ids:vocabulary(voc,user_id,path)
+    items={voc:vocabulary(voc,user_id,path) for voc in ids}
+    if not ids:
+        progress(message='Нет словарей для загрузки.',done=0,total=0);return
     if start>effective:
         progress(message='Период ещё не начался. Будущие заезды не запрашиваются.',done=0,total=0);return
     with core.connect(path) as c:run=c.execute("INSERT INTO app_runs(started_at,state,user_id) VALUES(?,'running',?)",(core.now(),user_id)).lastrowid
@@ -56,10 +71,14 @@ def sync_vocs(identifiers,start,end,progress=lambda **kw:None,path=None,user_id=
             if errors and limitation is None:limitation=probe(voc,effective,effective,user_id)
         names={}
         for voc,(details,_) in collected.items():
-            if details is None and vocabulary(voc,user_id,path)['name'].startswith('Словарь '):
+            if details is None and items[voc]['name'].startswith('Словарь '):
                 page=core.fetch(core.BASE+f'/vocs/{voc}/')
                 title=re.search(r'<title>(.*?)</title>',page,re.S|re.I)
                 if title:names[voc]=unescape(title[1]).split(' - ')[0].strip()
+        for voc,(details,_) in collected.items():
+            if details:items[voc]['name']=details['gametype']['name']
+            elif voc in names:items[voc]['name']=names[voc]
+        message=sync_message(list(items.values()),start,effective)
         fetched=core.now()
         with core.connect(path) as c:
             c.execute('INSERT INTO app_raw VALUES(?,?,?,?)',(run,0,'overview',json.dumps(overview,ensure_ascii=False)))
@@ -81,7 +100,7 @@ def sync_vocs(identifiers,start,end,progress=lambda **kw:None,path=None,user_id=
             for voc,name in names.items():c.execute('UPDATE app_vocs SET name=? WHERE id=?',(name,voc))
             c.execute("UPDATE app_runs SET state='done',finished_at=?,dictionaries=? WHERE id=?",(fetched,len(ids),run))
         profiles.refresh_optional(user_id,path)
-        progress(message=f'Обновлено словарей: {len(ids)}.',done=len(ids),total=len(ids))
+        progress(message=message,done=len(ids),total=len(ids))
     except Exception as exc:
         with core.connect(path) as c:c.execute("UPDATE app_runs SET state='error',finished_at=?,error=? WHERE id=?",(core.now(),str(exc),run))
         raise

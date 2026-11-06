@@ -33,6 +33,39 @@ class GoalTests(unittest.TestCase):
     def race(self,key,speed,errors,at='2026-11-02T12:00:00+03:00'):
         with core.connect(self.db) as c:c.execute('INSERT INTO app_races VALUES(?,?,?,?,?,?,?)',(core.USER_ID,100001,str(key),at,speed,errors,'test'))
 
+    def test_achievement_counts_use_individual_eligible_races_in_period(self):
+        gid=self.goal('errors',400,1)
+        self.daily(500)
+        self.race(1,400,0,'2026-11-01T00:00:00+03:00')
+        self.race(2,450,1,'2026-11-03T23:59:59+03:00')
+        self.race(3,500,2)
+        self.race(4,500,None)
+        self.race(5,399,0)
+        self.race(6,500,0,'2026-10-31T23:59:59+03:00')
+        self.race(7,500,0,'2026-11-04T00:00:00+03:00')
+        row=self.data(gid)['rows'][0]
+        self.assertEqual(row['achievement_count'],2)
+        self.assertFalse(row['achievement_count_complete'])
+        # Repeated ingestion of the same key replaces evidence, never adds a race.
+        with core.connect(self.db) as c:
+            c.execute('INSERT OR REPLACE INTO app_races VALUES(?,?,?,?,?,?,?)',(core.USER_ID,100001,'2','2026-11-03T23:59:59+03:00',450,1,'test'))
+            goals.cover(c,100001,'races','2026-11-01','2026-11-03',core.now())
+        row=self.data(gid)['rows'][0]
+        self.assertEqual(row['achievement_count'],2)
+        self.assertTrue(row['achievement_count_complete'])
+
+    def test_daily_maximum_does_not_invent_achievement_count(self):
+        gid=self.goal();self.daily(450)
+        self.assertIsNone(self.data(gid)['rows'][0]['achievement_count'])
+        with core.connect(self.db) as c:
+            goals.cover(c,100001,'races','2026-11-01','2026-11-03',core.now())
+        # Even inconsistent aggregate/race snapshots must never say 'achieved 0 times'.
+        self.assertIsNone(self.data(gid)['rows'][0]['achievement_count'])
+        with core.connect(self.db) as c:c.execute("DELETE FROM app_coverage WHERE kind='races'")
+        self.race(1,400,None)
+        self.assertEqual(self.data(gid)['rows'][0]['achievement_count'],1)
+        self.assertFalse(self.data(gid)['rows'][0]['achievement_count_complete'])
+
     def test_boundaries(self):
         for date,key,expected in [(dt.date(2026,3,31),'month','2026-02-28'),(dt.date(2024,3,31),'month','2024-02-29'),(dt.date(2026,1,3),'week','2025-12-28'),(dt.date(2024,2,29),'year','2023-02-28'),(dt.date(2026,11,3),'day','2026-11-03'),(dt.date(2026,11,3),'quarter','2026-08-03'),(dt.date(2026,11,3),'half','2026-05-03')]:
             self.assertEqual(goals.bounds(dict(period_type='rolling',rolling=key),date)[0],expected)
@@ -151,14 +184,28 @@ class GoalTests(unittest.TestCase):
         row=self.data(gid)['rows'][0]
         self.assertEqual((row['achievement_errors'],row['achievement_source']),(3,'race'))
 
-    def test_achievement_hidden_until_all_requirements_met(self):
+    def test_period_maximum_is_independent_of_goal_qualification(self):
         gid=self.goal('errors',400,1);self.daily(500);self.race(1,500,2);self.race(2,399,0)
         row=self.data(gid)['rows'][0]
-        self.assertIsNone(row['achievement_speed']);self.assertEqual(row['best_speed'],399)
+        self.assertEqual((row['achievement_speed'],row['achievement_errors']),(500,2))
+        self.assertEqual(row['best_speed'],399);self.assertNotEqual(row['status'],'done')
         self.race(3,400,1,'2026-11-01T00:00:00+03:00')
         self.race(4,450,1);self.race(5,450,0,'2026-11-03T10:00:00+03:00')
         row=self.data(gid)['rows'][0]
-        self.assertEqual((row['achievement_speed'],row['achievement_errors'],row['achievement_at']),(450,1,'2026-11-02T12:00:00+03:00'))
+        self.assertEqual((row['achievement_speed'],row['achievement_errors'],row['achievement_at']),(500,2,'2026-11-02T12:00:00+03:00'))
+        self.assertEqual(row['best_speed'],450);self.assertEqual(row['status'],'done')
+        self.assertEqual(row['achievement_count'],3)
+
+    def test_period_maximum_below_speed_requirement_and_without_error_details(self):
+        gid=self.goal('errors',600,0);self.daily(500)
+        row=self.data(gid)['rows'][0]
+        self.assertEqual((row['achievement_speed'],row['achievement_source'],row['achievement_errors']),(500,'daily',None))
+        self.assertNotEqual(row['status'],'done');self.assertTrue(row['period_complete'])
+        self.assertIsNone(row['best_speed'])
+        self.race(1,550,5)
+        row=self.data(gid)['rows'][0]
+        self.assertEqual((row['achievement_speed'],row['achievement_source']),(550,'race'))
+        self.assertNotEqual(row['status'],'done')
 
     def test_achievement_disappears_when_rolling_day_changes(self):
         gid=self.goal(period_type='rolling',rolling='day');self.race(1,400,None,'2026-11-03T10:00:00+03:00')

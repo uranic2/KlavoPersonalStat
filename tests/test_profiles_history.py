@@ -108,7 +108,9 @@ class ProfileHistoryTests(unittest.TestCase):
             with core.connect(self.db) as c:
                 c.execute('INSERT OR REPLACE INTO app_current VALUES(?,?,?,?,?,?,?,?)',(core.USER_ID,812,400,date,1,None,None,core.now()))
             row=goals.dashboard(gid,self.db,dt.date(2026,11,3))['rows'][0]
-            self.assertEqual(row['record_in_period'],expected);self.assertIsNone(row['achievement_speed'])
+            self.assertEqual(row['record_in_period'],expected)
+            self.assertEqual(row['achievement_speed'],400 if expected else None)
+            self.assertNotEqual(row['status'],'done')
 
     def test_background_update_captures_profile_instead_of_later_default(self):
         started=threading.Event();finish=threading.Event();seen=[]

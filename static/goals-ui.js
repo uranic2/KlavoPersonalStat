@@ -2,7 +2,26 @@
 let editorKind='goal',editorItems=new Map(),editingGoal=null,goalDeleteConfirm=false,tableMode=null,tableGoal=null;
 const goalStatusLabels={done:'Достигнуто',pending:'Не достигнуто',empty:'Нет заездов',unloaded:'Не загружено',partial:'Данные неполные',unverifiable:'Не удалось проверить',unconfigured:'Не настроено',future:'Период не начался'};
 const rollingLabels={day:'День',week:'Неделя',month:'Месяц',quarter:'Три месяца',half:'Полгода',year:'Год'};
-const goalColumns=[['name','Словарь'],['speed','Требование'],['month_races','Заездов'],['record','Личный рекорд (дата)'],['achievement_speed','Достижение'],['status_label','Статус'],['actions','Действия']];
+const goalColumns=[['name','Словарь'],['speed','Требование'],['month_races','Заездов'],['record','Рекорд'],['record_date','Дата личного рекорда'],['achievement_speed','Достижение'],['status_label','Статус'],['actions','Действия']];
+let hiddenGoalColumns=new Set(['record_date']);
+try{const saved=JSON.parse(localStorage.getItem('klavo-goal-hidden-columns'));if(Array.isArray(saved))hiddenGoalColumns=new Set(saved.filter(k=>k!=='name'&&goalColumns.some(([key])=>key===k)));}catch(exc){}
+function visibleGoalColumns(){return goalColumns.filter(([key])=>!hiddenGoalColumns.has(key));}
+function renderGoalColumns(refreshOptions=true){
+  $('#table-head').innerHTML='<tr>'+visibleGoalColumns().map(([key,label])=>key==='actions'?'<th scope="col" class="actions-heading">Действия</th>':`<th scope="col"><button data-sort="${key}">${label} <span>↕</span></button></th>`).join('')+'</tr>';
+  if(refreshOptions)$('#column-options').innerHTML=goalColumns.map(([key,label])=>`<label><input type="checkbox" data-goal-column="${key}" ${hiddenGoalColumns.has(key)?'':'checked'} ${key==='name'?'disabled':''}>${label}</label>`).join('');
+}
+function setGoalColumn(key,visible){
+  if(key==='name'||!goalColumns.some(([k])=>k===key))return;
+  if(visible)hiddenGoalColumns.delete(key);else hiddenGoalColumns.add(key);
+  if(hiddenGoalColumns.has(state.sort))state.sort=null;
+  try{localStorage.setItem('klavo-goal-hidden-columns',JSON.stringify([...hiddenGoalColumns]));}catch(exc){}
+  renderGoalColumns(false);renderGoalTable();
+}
+function achievementStatus(r){
+  if(r.status!=='done'||r.achievement_count==null)return r.status_label;
+  const n=r.achievement_count,last=n%10,hundred=n%100;
+  return `Достигнуто ${n} ${last>=2&&last<=4&&(hundred<12||hundred>14)?'раза':'раз'}`;
+}
 function showSection(section){
   state.section=section;$('#dashboard-view').hidden=section!=='dashboard';$('#settings-view').hidden=section!=='settings';
   $('#nav-dashboard').classList.toggle('active',section==='dashboard');$('#nav-settings').classList.toggle('active',section==='settings');
@@ -12,9 +31,11 @@ function showSection(section){
 function configureTable(){
   const mode=state.goalData?'goal':'group';
   $('#achieved-section').hidden=mode!=='goal';
+  $('#column-settings').hidden=mode!=='goal';
   if(tableMode===mode){if(mode==='goal'&&tableGoal!==state.goal){$('#filter').value='all';state.page=0;state.sort=null;tableGoal=state.goal;}return;}tableMode=mode;tableGoal=state.goal;state.sort=null;state.page=0;
   const columns=mode==='goal'?goalColumns:[['name','Словарь'],['record','Рекорд'],['record_date','Дата рекорда'],['month_max','Максимум за месяц'],['month_date','Дата за месяц'],['actions','Действия']];
   $('#table-head').innerHTML='<tr>'+columns.map(([key,label])=>key==='actions'?'<th scope="col" class="actions-heading">Действия</th>':`<th scope="col"><button data-sort="${key}">${label} <span>↕</span></button></th>`).join('')+'</tr>';
+  if(mode==='goal')renderGoalColumns();
   $('#filter').innerHTML=mode==='goal'?'<option value="all">Все статусы</option>'+Object.entries(goalStatusLabels).map(([k,v])=>`<option value="${k}">${v}</option>`).join(''):'<option value="played">С результатами</option><option value="all">Все словари</option><option value="active">С заездами за месяц</option><option value="unplayed">Без результатов</option>';
   $('#table-title').textContent=mode==='goal'?'Выполнение цели (по словарям)':'Результаты по словарям';
   $('#legend').textContent=mode==='goal'?'Светло-зелёным выделены достигнутые требования. Скорость и ошибки проверяются по одному заезду.':'Зелёным выделен максимум за месяц. Метка «Рекорд» — рекорд установлен в периоде.';
@@ -48,22 +69,37 @@ function goalRaceCount(r){
 }
 function goalRow(r){
   const races=goalRaceCount(r);
-  const racesCell=races==null?'—':`${races.toLocaleString('ru')}${!r.complete?'<small>По загруженным данным</small>':''}`;
+  const racesCell=races==null?'—':races.toLocaleString('ru');
 
-  const complete=r.achievement_complete??r.complete;
+  const complete=r.period_complete??r.complete;
   const achievement=r.achievement_speed==null?'—':`<b>${r.achievement_speed} зн/мин</b><small>${goalResultDate(r.achievement_at)} · ${r.achievement_errors==null?'Ошибки неизвестны':r.achievement_errors+' ош.'}</small>${r.achievement_source==='daily'?'<small>Дневной максимум</small>':''}${!complete?'<small>Лучший среди загруженных данных</small>':''}`;
-  const record=r.record_in_period?`<small class="goal-record-badge">Личный рекорд в периоде</small>${r.status!=='done'?'<small>Требования цели этим рекордом не подтверждены</small>':''}`:'';
-  return `<tr class="${r.status==='done'?'achieved':''}"><td><a href="${trainingUrl(r.id)}" title="${esc(r.name)}" target="_blank" rel="noopener">${esc(displayName(r))}</a><small>№${r.id}</small></td><td><b>${r.speed==null?'—':r.speed+' зн/мин'}</b><small>${r.mode==='errors'?'Ошибок ≤ '+(r.max_errors??'—'):'Только скорость'}</small></td><td class="number race-count">${racesCell}</td><td class="number">${r.record==null?'—':`<b>${r.record} зн/мин</b>`}<small>${goalResultDate(r.record_date)}</small></td><td class="number achievement-value">${achievement}${record}</td><td><span class="status-badge status-${r.status}">${esc(r.status_label)}</span>${r.reason?`<small class="status-reason">${esc(r.reason)}</small>`:''}${!complete&&r.status==='done'?'<small>История неполна</small>':''}</td><td>${rowActions(r)}</td></tr>`;
+  const record=r.record_in_period?'<span class="goal-record-badge tooltip" tabindex="0" aria-label="Личный рекорд в периоде" data-tooltip="Личный рекорд в периоде">★</span>':'';
+  const countHint=r.status==='done'&&r.achievement_count!=null&&!r.achievement_count_complete?'Количество по доступной истории':'';
+  const reason=r.status==='done'?'':r.reason;
+  const cells={
+    name:`<a href="${trainingUrl(r.id)}" title="${esc(r.name)}" target="_blank" rel="noopener">${esc(displayName(r))}</a><small>№${r.id}</small>`,
+    speed:`<b>${r.speed==null?'—':r.speed+' зн/мин'}</b><small>${r.mode==='errors'?'Ошибок ≤ '+(r.max_errors??'—'):'Только скорость'}</small>`,
+    month_races:racesCell,
+    record:r.record==null?'—':`<b>${r.record} зн/мин</b>`,
+    record_date:goalResultDate(r.record_date),
+    achievement_speed:achievement+record,
+    status_label:`<span class="status-badge status-${r.status} ${countHint?'tooltip':''}" ${countHint?`tabindex="0" data-tooltip="${countHint}" aria-label="${esc(achievementStatus(r))}. ${countHint}"`:''}>${esc(achievementStatus(r))}</span>${reason?`<small class="status-reason">${esc(reason)}</small>`:''}`,
+    actions:rowActions(r)
+  };
+  const classes={month_races:'number race-count',record:'number',achievement_speed:'number achievement-value'};
+  return `<tr class="${r.status==='done'?'achieved':''}">`+visibleGoalColumns().map(([key])=>`<td${classes[key]?` class="${classes[key]}"`:''}>${cells[key]}</td>`).join('')+'</tr>';
+
 }
 function renderAchievedTable(){
   const rows=state.goalData.rows.filter(r=>r.status==='done');
   $('#achieved-count').textContent=rows.length;
-  $('#achieved-head').innerHTML='<tr>'+goalColumns.map(([,label])=>`<th scope="col">${label}</th>`).join('')+'</tr>';
+  $('#achieved-head').innerHTML='<tr>'+visibleGoalColumns().map(([,label])=>`<th scope="col">${label}</th>`).join('')+'</tr>';
   $('#achieved-rows').innerHTML=rows.map(goalRow).join('');
   $('#achieved-empty').hidden=!!rows.length;
   $('#achieved-table').hidden=!rows.length;
 }
 function renderGoalTable(){
+  if(vocabularyMenuTarget)closeVocabularyMenu();
   const d=state.goalData,q=$('#search').value.trim().toLocaleLowerCase('ru'),f=$('#filter').value;
   const rows=d.rows.filter(r=>matchesVocabulary(r,q)&&(f==='all'||r.status===f));
   if(state.sort)rows.sort((a,b)=>{const x=state.sort==='name'?displayName(a):state.sort==='month_races'?goalRaceCount(a):a[state.sort],y=state.sort==='name'?displayName(b):state.sort==='month_races'?goalRaceCount(b):b[state.sort];if(x==null)return y==null?0:1;if(y==null)return -1;return state.direction*(typeof x==='number'?x-y:String(x).localeCompare(String(y),'ru'));});
@@ -117,6 +153,7 @@ async function openGoal(identifier=null,kind='goal',source=null){
 }
 
 function setupGoals(){
+  $('#column-options').addEventListener('change',e=>{if(e.target.dataset.goalColumn)setGoalColumn(e.target.dataset.goalColumn,e.target.checked);});
   $('#nav-dashboard').onclick=()=>showSection('dashboard');$('#nav-settings').onclick=()=>showSection('settings');
   $('#edit-current-goal').onclick=()=>openGoal(Number(state.goal));
   $('#settings-templates').onclick=()=>{state.settingsTab='templates';renderSettings();};

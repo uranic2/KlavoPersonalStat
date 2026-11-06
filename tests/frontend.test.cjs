@@ -83,7 +83,7 @@ test('goal tables share rows while achieved list ignores filters and pagination'
   assert.equal((f.node('#table-head').innerHTML.match(/<th /g)||[]).length,7);
   assert.doesNotMatch(f.node('#table-head').innerHTML,/month_max|best_speed|best_at/);
   assert.ok(done.includes(main));assert.equal(f.node('#achieved-count').textContent,2);
-  assert.match(main,/900 зн\/мин/);assert.match(main,/01\.10\.2026/);assert.match(main,/Ошибки неизвестны/);assert.match(main,/Дневной максимум/);assert.match(main,/Лучший среди загруженных данных/);
+  assert.match(main,/900 зн\/мин/);assert.doesNotMatch(main,/01\.10\.2026/);assert.match(main,/Ошибки неизвестны/);assert.match(main,/Дневной максимум/);assert.match(main,/Лучший среди загруженных данных/);
   assert.match(main,/&lt;Alias&gt;/);assert.match(main,/title="Full"/);assert.match(main,/target="_blank" rel="noopener"/);
   assert.match(done,/03\.11\.2026 · 0 ош\./); // Moscow date crosses midnight.
   f.node('#search').value='Pending';f.node('#filter').value='pending';f.run('renderTable()');
@@ -140,6 +140,75 @@ test('race column distinguishes confirmed zero, partial counts and missing histo
   assert.equal(f.run('goalRaceCount({month_races:0,complete:false})'),null);
   assert.equal(f.run('goalRaceCount({month_races:26,complete:false})'),26);
   const row=f.run(`goalRow({id:1,name:'Test',status:'partial',status_label:'Данные неполные',mode:'speed',month_races:26,complete:false})`);
-  assert.match(row,/<td class="number race-count">26<small>По загруженным данным<\/small><\/td>/);
+  assert.match(row,/<td class="number race-count">26<\/td>/);
   assert.equal((row.match(/<td[ >]/g)||[]).length,7);
+});
+
+test('column preferences apply to both tables and reset hidden sorting',()=>{
+  const f=fixture(true);f.run(`state.goalData={rows:[{id:1,name:'Test',status:'done',status_label:'Достигнуто',record_date:'2026-10-01'}]};state.data={};`);f.node('#filter').value='all';
+  f.run(`setGoalColumn('record_date',true)`);
+  assert.match(f.node('#rows').innerHTML,/01\.10\.2026/);assert.match(f.node('#achieved-rows').innerHTML,/01\.10\.2026/);
+  assert.equal((f.node('#table-head').innerHTML.match(/<th /g)||[]).length,8);
+  f.run(`state.sort='record_date';setGoalColumn('record_date',false);setGoalColumn('name',false)`);
+  assert.equal(f.run('state.sort'),null);assert.equal(f.storage.get('klavo-goal-hidden-columns'),'["record_date"]');
+  assert.equal(f.run(`visibleGoalColumns().some(([key])=>key==='name')`),true);
+  assert.doesNotMatch(f.node('#rows').innerHTML,/01\.10\.2026/);
+  f.run(`setGoalColumn('actions',false)`);assert.doesNotMatch(f.node('#achieved-rows').innerHTML,/row-actions/);
+});
+test('status counts decline correctly and aggregate-only evidence has no invented count',()=>{
+  const f=fixture();for(const [n,label] of [[1,'1 раз'],[2,'2 раза'],[5,'5 раз'],[11,'11 раз'],[12,'12 раз'],[21,'21 раз'],[22,'22 раза'],[111,'111 раз']])assert.equal(f.run(`achievementStatus({status:'done',achievement_count:${n}})`),'Достигнуто '+label);
+  const html=f.run(`goalRow({id:1,name:'Test',status:'done',status_label:'Достигнуто',record_in_period:true,achievement_count:2,achievement_count_complete:false,reason:'История неполна'})`);
+  assert.match(html,/Количество по доступной истории/);assert.match(html,/data-tooltip="Личный рекорд в периоде"/);assert.doesNotMatch(html,/История неполна/);
+  assert.equal(f.run(`achievementStatus({status:'done',status_label:'Достигнуто',achievement_count:null})`),'Достигнуто');
+});
+test('record dates sort chronologically with unknown dates last',()=>{
+  const f=fixture(true);f.node('#filter').value='all';f.run(`state.data={};state.goalData={rows:[{id:1,name:'Missing'},{id:2,name:'Earlier',record_date:'2025-12-31'},{id:3,name:'Later',record_date:'2026-01-01'}]};state.sort='record_date';`);
+  for(const direction of [1,-1]){f.run(`state.direction=${direction};renderTable()`);assert.deepEqual([...f.node('#rows').innerHTML.matchAll(/<small>№(\d+)<\/small>/g)].map(m=>Number(m[1])),direction===1?[2,3,1]:[3,2,1]);}
+});
+test('sync requests cannot be started twice while the first request is pending',async()=>{
+  const f=fixture(),d=defer();let calls=0;f.ctx.mockRequest=()=>{calls++;return d.promise;};f.run('poll=async()=>{state.jobRunning=false;}');
+  const first=f.run('refreshVocabulary(1)');await f.run('refreshVocabulary(1)');assert.equal(calls,1);d.resolve({});await first;assert.equal(f.run('refreshPending'),false);
+});
+
+test('failed sync releases the pending guard and allows retry',async()=>{
+  const f=fixture();f.ctx.mockRequest=async()=>{throw new Error('offline');};
+  await assert.rejects(f.run('refreshVocabulary(1)'),/offline/);assert.equal(f.run('refreshPending'),false);
+  f.run(`state.goal='3';request=async(url,data)=>{window.syncBody=data;};poll=async()=>{state.jobRunning=false;}`);
+  await f.run('refreshVocabulary(853)');assert.deepEqual(JSON.parse(f.run('JSON.stringify(window.syncBody)')),{voc_id:853,goal_id:3});
+});
+
+test('period maximum remains visible for unmet goals without record qualification text',()=>{
+  const f=fixture();
+  const html=f.run(`goalRow({id:1,name:'Test',mode:'errors',speed:600,max_errors:0,status:'pending',status_label:'Не достигнуто',achievement_speed:550,achievement_at:'2026-11-02',achievement_errors:5,achievement_source:'race',record_in_period:true,period_complete:true,achievement_complete:false})`);
+  assert.match(html,/<b>550 зн\/мин<\/b>/);assert.match(html,/5 ош\./);
+  assert.match(html,/Не достигнуто/);assert.match(html,/Личный рекорд в периоде/);
+  assert.doesNotMatch(html,/Требования цели этим рекордом не подтверждены|Лучший среди загруженных данных/);
+});
+
+test('completed sync keeps the original operation message visible as plain text after navigation',async()=>{
+  const f=fixture();
+  const message='Загружены данные для «<img src=x>» (№812) за 01.11.2026.';
+  f.run(`state.jobVersion=0;state.jobRunning=true;state.goal='another-goal';loadData=async()=>{};`);
+  f.ctx.mockRequest=async()=>({running:false,message,done:1,total:1,error:null,version:1});
+  await f.run('poll()');
+  assert.equal(f.node('#sync-box').hidden,false);
+  assert.equal(f.node('#sync-message').textContent,message);
+  assert.equal(f.node('#sync-message').innerHTML,undefined);
+  assert.equal(f.node('#toast').hidden,false);assert.equal(f.node('#toast').textContent,message);
+  assert.equal(f.node('#sync-progress').hidden,true);assert.equal(f.node('#sync-count').hidden,true);
+  assert.equal(f.node('#refresh').disabled,false);
+  await f.run('poll()');assert.equal(f.node('#sync-message').textContent,message);
+  f.run('clearTimeout(toastTimer)');
+});
+
+test('sync progress retains its counter and failures never show the success panel',async()=>{
+  const f=fixture();f.run('state.jobVersion=0;loadData=async()=>{};');
+  f.ctx.mockRequest=async()=>({running:true,message:'Загрузка…',done:2,total:3,error:null,version:0});
+  await f.run('poll()');
+  assert.equal(f.node('#sync-progress').hidden,false);assert.equal(f.node('#sync-progress').value,2);
+  assert.equal(f.node('#sync-count').hidden,false);assert.equal(f.node('#sync-count').textContent,'2 / 3');
+  f.ctx.mockRequest=async()=>({running:false,message:'Обновление не завершено. Предыдущие данные сохранены.',error:'offline',version:1});
+  await f.run('poll()');
+  assert.equal(f.node('#sync-box').hidden,true);
+  assert.match(f.node('#error-box').textContent,/Предыдущие данные сохранены/);
 });

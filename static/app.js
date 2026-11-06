@@ -22,7 +22,7 @@ const matchesVocabulary = (row,search) => [row.name,row.short_name,String(row.id
 function trainingUrl(id){const url=new URL('https://klavogonki.ru/create/');url.search=new URLSearchParams({gametype:'voc',voc:String(id),type:'practice',level_from:'1',level_to:'8',timeout:'5',submit:'Начать'}).toString();return url.href;}
 function error(message){$('#error-box').textContent=message;$('#error-box').hidden=!message;}
 let toastTimer;
-function toast(message){clearTimeout(toastTimer);$('#toast').textContent=message;$('#toast').hidden=false;toastTimer=setTimeout(()=>$('#toast').hidden=true,5000);}
+function toast(message,duration=5000){clearTimeout(toastTimer);$('#toast').textContent=message;$('#toast').hidden=false;toastTimer=setTimeout(()=>$('#toast').hidden=true,duration);}
 async function request(url,body){
   if(state.profileId){if(body===undefined)url+=(url.includes('?')?'&':'?')+'profile='+state.profileId;else body={...body,profile:state.profileId};}
   const options=body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-Klavo-Token':state.token},body:JSON.stringify(body)};
@@ -120,15 +120,16 @@ async function poll(){
     const wasRunning=state.jobRunning;state.jobRunning=job.running;
     $('#refresh').disabled=job.running||state.viewLoading;$('#add-group').disabled=job.running;$('#edit-group').disabled=job.running;
     $('#refresh').classList.toggle('refreshing',job.running);
-    document.querySelectorAll('[data-voc-action="refresh"]').forEach(b=>b.disabled=job.running);
+    updateRefreshButtons(job.running||refreshPending);
     if(!job.running&&wasRunning&&detailsContext?.type==='chart'){const ctx=detailsContext;loadChart(ctx).catch(e=>{if(currentDetails(ctx))detailMessage(e.message);});}
-    $('#sync-box').hidden=!job.running;
+    $('#sync-box').hidden=!job.running&&(!job.message||Boolean(job.error));
     $('#sync-message').textContent=job.message;
     $('#sync-count').textContent=job.total?`${job.done} / ${job.total}`:'';
-    const p=$('#sync-progress');p.max=job.total||1;if(job.total)p.value=job.done;else p.removeAttribute('value');
+    $('#sync-count').hidden=!job.running;
+    const p=$('#sync-progress');p.hidden=!job.running;p.max=job.total||1;if(job.total)p.value=job.done;else p.removeAttribute('value');
     if(!job.running&&state.jobVersion!==null&&job.version!==state.jobVersion){
       await loadData();
-      if(job.error)error(job.message+'\n'+job.error);else{error('');toast(job.message);}
+      if(job.error)error(job.message+'\n'+job.error);else{error('');toast(job.message,10000);}
     }else if(!job.running&&state.jobVersion===null&&job.error)error(job.message+'\n'+job.error);
     state.jobVersion=job.version;
   }catch(exc){error('Нет связи с локальным приложением. Запустите start.cmd и перезагрузите страницу.');}

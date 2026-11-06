@@ -214,10 +214,22 @@ def dashboard(identifier,path=None,today=None,user_id=core.USER_ID):
                 capability=conn.execute('SELECT error FROM app_capabilities WHERE user_id=? AND voc_id=?',(user_id,voc)).fetchone()
                 r['reason']=('Для загрузки отдельных заездов сайт требует Premium.' if capability['error']=='not pro' else capability['error']) if capability and capability['error'] else 'В сохранённых данных нет полной истории заездов для проверки ошибок. Нажмите «Обновить».'
             else:status='pending'
+            matched={x['race_key'] for x in eligible if configured and x['speed']>=r['speed']}
+            r['achievement_count']=len(matched) if matched or (race_complete and status!='done') else None
+            r['achievement_count_complete']=race_complete
             r['status']=status;r['status_label']=STATUSES[status]
             if status=='done' and not r['achievement_complete']:r['reason']='Достижение подтверждено дневным максимумом; остальная история неполна.' if r['best_source']=='daily' else 'Достижение подтверждено одним заездом; остальная история неполна.'
             r['record_in_period']=bool(r['record'] is not None and r['record_date'] and start<=r['record_date']<=effective_end)
-            r.update(achievement_speed=r['best_speed'] if status=='done' else None,achievement_at=r['best_at'] if status=='done' else None,achievement_errors=r['best_errors'] if status=='done' else None,achievement_source=r['best_source'] if status=='done' else None)
+            # Display the period maximum independently of goal qualification.
+            candidates=[]
+            if days and days[0]['max_speed'] is not None:
+                candidates.append((days[0]['max_speed'],days[0]['day'],None,'daily',''))
+            if races:
+                candidates.extend((x['speed'],x['at'],x['errors'],'race',x['race_key']) for x in races if x['speed'] is not None)
+            if r['record_in_period']:
+                candidates.append((r['record'],r['record_date'],None,'record',''))
+            maximum=min(candidates,key=lambda x:(-x[0],x[1][:10],0 if x[3]=='race' else 1,x[1],x[4])) if candidates else (None,None,None,None,'')
+            r.update(achievement_speed=maximum[0],achievement_at=maximum[1],achievement_errors=maximum[2],achievement_source=maximum[3],period_complete=complete or race_complete)
         counts={key:sum(r['status']==key for r in rows) for key in STATUSES}
     return {'goal':goal,'rows':rows,'period_from':start,'period_to':end,'phase':phase,'counts':counts,'percent':round(counts['done']/len(rows)*100,1) if rows else 0,'statuses':STATUSES}
 

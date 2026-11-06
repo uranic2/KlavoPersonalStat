@@ -1,8 +1,29 @@
 'use strict';
 let detailsContext=null,detailsGeneration=0;
 function profileUrl(url){return state.profileId?url+(url.includes('?')?'&':'?')+'profile='+state.profileId:url;}
+let vocabularyMenuTarget=null,refreshPending=false;
 function rowActions(r){
-  return `<div class="row-actions">${[['refresh','Обновить'],['chart','График'],['errors','Ошибки']].map(([key,label])=>`<button class="button secondary" data-voc-action="${key}" data-voc-id="${r.id}" aria-label="${label}: ${esc(displayName(r))}, словарь ${r.id}" ${key==='refresh'?'title="Обновить результаты этого словаря с Клавогонок"':''} ${key==='refresh'&&state.jobRunning?'disabled':''}>${label}</button>`).join('')}</div>`;
+  if(!state.goalData)return `<div class="row-actions">${[['refresh','Обновить'],['chart','График']].map(([key,label])=>`<button class="button secondary" data-voc-action="${key}" data-voc-id="${r.id}" aria-label="${label}: ${esc(displayName(r))}, словарь ${r.id}" ${key==='refresh'&&(state.jobRunning||refreshPending)?'disabled':''}>${label}</button>`).join('')}</div>`;
+  const label=esc(displayName(r))+', словарь '+r.id;
+  return `<div class="row-actions compact-actions"><a class="button secondary" href="${trainingUrl(r.id)}" target="_blank" rel="noopener" title="Тренировать" aria-label="Тренировать: ${label}">▶</a><button class="button secondary ${state.jobRunning||refreshPending?'refreshing':''}" data-voc-action="refresh" data-voc-id="${r.id}" aria-busy="${state.jobRunning||refreshPending}" title="Загрузить данные" aria-label="Загрузить данные: ${label}" ${state.jobRunning||refreshPending?'disabled':''}><svg class="import-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3v12m-5-5 5 5 5-5M4 15v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/></svg></button><button class="button secondary" data-voc-action="more" data-voc-id="${r.id}" title="Ещё" aria-label="Ещё: ${label}" aria-haspopup="true" aria-expanded="false">⋯</button></div>`;
+}
+function closeVocabularyMenu(){
+  $('#vocabulary-menu').hidePopover();
+  vocabularyMenuTarget?.setAttribute('aria-expanded','false');vocabularyMenuTarget=null;
+}
+function openVocabularyMenu(id,button){
+  const menu=$('#vocabulary-menu');
+  if(vocabularyMenuTarget===button){closeVocabularyMenu();return;}
+  closeVocabularyMenu();vocabularyMenuTarget=button;
+  const external=(label,url)=>`<a href="${url}" target="_blank" rel="noopener">${label}</a>`;
+  menu.innerHTML=`<button data-voc-action="requirement" data-voc-id="${id}">Настроить требование в цели</button>`+
+    external('Страница словаря',`https://klavogonki.ru/vocs/${id}/`)+
+    external('Открытая игра 10 сек',`https://klavogonki.ru/create/?submit=1&gametype=voc&voc=${id}&type=normal&level_from=1&level_to=9&timeout=10`)+
+    external('Рекорды',`https://klavogonki.ru/vocs/${id}/top/week/`);
+  menu.showPopover();button.setAttribute('aria-expanded','true');
+  const rect=button.getBoundingClientRect();menu.style.left=Math.max(8,Math.min(rect.right-menu.offsetWidth,window.innerWidth-menu.offsetWidth-8))+'px';
+  menu.style.top=Math.max(8,Math.min(rect.bottom+6,window.innerHeight-menu.offsetHeight-8))+'px';
+  menu.querySelector('button').focus();
 }
 function detailMessage(message){$('#details-message').textContent=message;}
 function currentDetails(ctx){return detailsContext===ctx&&ctx.generation===detailsGeneration&&ctx.profile===state.profileId&&$('#details-dialog').open;}
@@ -37,37 +58,57 @@ async function loadChart(ctx){
   if(currentDetails(ctx)&&ctx.request===generation)renderChart(data,ctx);
 }
 async function refreshVocabulary(id,custom=null){
+  if(refreshPending||state.jobRunning)return;
+  refreshPending=true;updateRefreshButtons(true);
   const body={voc_id:id,...(state.goal?{goal_id:Number(state.goal)}:{})};
   if(custom){delete body.goal_id;body.date_from=custom.from;body.date_to=custom.to;}
-  await request('/api/sync',body);await poll();
+  try{await request('/api/sync',body);state.jobRunning=true;await poll();}
+  finally{refreshPending=false;updateRefreshButtons(state.jobRunning);}
 }
 async function openVocabulary(id,type){
   const r=(state.goalData?.rows||state.data.rows).find(r=>r.id===id);if(!r)return;
   if(type==='refresh'){try{await refreshVocabulary(id);}catch(e){error(e.message);}return;}
+  if(type!=='chart')return;
   const period=state.goalData||state.data;
   const ctx=detailsContext={id,type,profile:state.profileId,generation:++detailsGeneration,request:0,threshold:state.goalData?r.speed:null};
-  $('#details-title').textContent=type==='chart'?'Прогресс по словарю':'Слова с ошибками';$('#details-voc').textContent=displayName(r)+' · №'+id;
-  $('#details-from').value=period.period_from;$('#details-to').value=period.period_to;$('#details-limit').value=10;
-  $('#details-limit-field').hidden=type!=='errors';$('#details-limit').required=type==='errors';$('#details-submit').textContent=type==='chart'?'Показать':'Проанализировать';$('#details-submit').disabled=false;$('#details-load').hidden=true;$('#details-content').innerHTML='';detailMessage('');$('#details-dialog').showModal();
+  $('#details-title').textContent='Прогресс по словарю';$('#details-voc').textContent=displayName(r)+' · №'+id;
+  $('#details-from').value=period.period_from;$('#details-to').value=period.period_to;
+  $('#details-submit').textContent='Показать';$('#details-submit').disabled=false;$('#details-load').hidden=true;$('#details-content').innerHTML='';detailMessage('');$('#details-dialog').showModal();
   if(type==='chart'){detailMessage('Читаем сохранённую историю…');try{await loadChart(ctx);}catch(e){if(currentDetails(ctx))detailMessage(e.message);}}
 }
+function updateRefreshButtons(busy){
+  document.querySelectorAll('[data-voc-action="refresh"]').forEach(b=>{b.disabled=busy;b.classList.toggle('refreshing',busy);b.setAttribute('aria-busy',String(busy));});
+}
 function setupDetails(){
-  document.addEventListener('click',e=>{const b=e.target.closest('[data-voc-action]');if(b)openVocabulary(Number(b.dataset.vocId),b.dataset.vocAction);});
+  const menu=document.createElement('div');menu.id='vocabulary-menu';menu.className='table-popover vocabulary-menu';menu.setAttribute('popover','auto');menu.setAttribute('aria-label','Действия со словарём');document.body.append(menu);
+  menu.addEventListener('toggle',e=>{if(e.newState==='closed'){vocabularyMenuTarget?.setAttribute('aria-expanded','false');vocabularyMenuTarget=null;}});
+  menu.addEventListener('keydown',e=>{
+    const items=[...menu.querySelectorAll('button,a')],index=items.indexOf(document.activeElement);
+    if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();items[(index+(e.key==='ArrowDown'?1:items.length-1))%items.length].focus();}
+    if(e.key==='Escape'){e.preventDefault();const target=vocabularyMenuTarget;closeVocabularyMenu();target?.focus();}
+  });
+  document.addEventListener('click',async e=>{
+    const b=e.target.closest('[data-voc-action]');
+    if(b){
+      const id=Number(b.dataset.vocId),action=b.dataset.vocAction;
+      if(action==='more'){openVocabularyMenu(id,b);return;}
+      closeVocabularyMenu();
+      if(action==='requirement'){
+        const goal=Number(state.goal);if(!goal)return;
+        await openGoal(goal);
+        const input=$(`#goal-items tr[data-id="${id}"] [data-field="speed"]`);input?.focus();input?.scrollIntoView({block:'center'});return;
+      }
+      await openVocabulary(id,action);
+    }else if(e.target.closest('#vocabulary-menu a'))closeVocabularyMenu();
+  });
   $('#details-close').onclick=()=>$('#details-dialog').close();
   $('#details-dialog').addEventListener('close',()=>{detailsContext=null;++detailsGeneration;});
   $('#details-form').onsubmit=async e=>{
     e.preventDefault();const ctx=detailsContext;if(!ctx||ctx.busy)return;
     if($('#details-from').value>$('#details-to').value){detailMessage('Дата начала не должна быть позже даты окончания.');return;}
-    ctx.busy=true;$('#details-submit').disabled=true;$('#details-content').innerHTML='';detailMessage(ctx.type==='chart'?'Читаем сохранённую историю…':'Загружаем доступную историю и проверяем возможность анализа…');
-    try{
-      if(ctx.type==='chart')await loadChart(ctx);
-      else{
-        const data=await request('/api/errors',{voc_id:ctx.id,date_from:$('#details-from').value,date_to:$('#details-to').value,limit:Number($('#details-limit').value)});
-        if(!currentDetails(ctx))return;
-        detailMessage(data.message);
-        $('#details-content').innerHTML=`<p class="hint">${fmtDate(data.period_from)} — ${fmtDate(data.period_to)} · Проанализировано заездов: ${data.processed} · Пропущено: ${data.skipped} · Всего: ${data.total??'неизвестно'} · ${data.analysis_complete?'Полный анализ':'Полнота не подтверждена'}</p>`+(data.words.length?'<div class="table-wrap"><table><thead><tr><th>Слово</th><th>Вхождений с ошибкой</th></tr></thead><tbody>'+data.words.map(w=>`<tr><td>${esc(w.word)}</td><td>${w.count}</td></tr>`).join('')+'</tbody></table></div>':'');
-      }
-    }catch(e){if(currentDetails(ctx))detailMessage(e.message);}
+    ctx.busy=true;$('#details-submit').disabled=true;$('#details-content').innerHTML='';detailMessage('Читаем сохранённую историю…');
+    try{await loadChart(ctx);}
+    catch(e){if(currentDetails(ctx))detailMessage(e.message);}
     finally{ctx.busy=false;if(currentDetails(ctx))$('#details-submit').disabled=false;}
   };
   $('#details-load').onclick=async()=>{
